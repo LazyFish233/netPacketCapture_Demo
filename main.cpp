@@ -58,12 +58,12 @@ static void printPacketRow(const PacketInfo& pkt) {
 
 // ==================== 接口选择 ====================
 
-static pcap_if_t* selectInterface() {
+static std::string selectInterface() {
     pcap_if_t* allDevs = nullptr;
     char errBuf[256] = {0};
     if (g_pcap.findalldevs(&allDevs, errBuf) == -1 || !allDevs) {
         std::cerr << "获取网络接口失败: " << errBuf << std::endl;
-        return nullptr;
+        return "";
     }
 
     std::cout << "\n可用网络接口:" << std::endl;
@@ -85,7 +85,7 @@ static pcap_if_t* selectInterface() {
     if (count == 0) {
         std::cerr << "未找到可用网络接口" << std::endl;
         g_pcap.freealldevs(allDevs);
-        return nullptr;
+        return "";
     }
 
     int choice = 0;
@@ -104,7 +104,9 @@ static pcap_if_t* selectInterface() {
 
     pcap_if_t* target = allDevs;
     for (int i = 1; i < choice; i++) target = target->next;
-    return target;
+    std::string devName = target->name;
+    g_pcap.freealldevs(allDevs);
+    return devName;
 }
 
 // ==================== 抓包线程 ====================
@@ -186,11 +188,11 @@ static void saveLog() {
 
 // ==================== 交互菜单 ====================
 
-static void interactiveMenu() {
+static bool interactiveMenu() {
     std::string input;
     while (true) {
         std::cout << "\n---------------------------------------------" << std::endl;
-        std::cout << "输入数据包序号查看详情 | s: 保存日志 | l: 重新列出 | q: 退出" << std::endl;
+        std::cout << "输入数据包序号查看详情 | s: 保存日志 | l: 重新列出 | r: 重新选择网卡 | q: 退出" << std::endl;
         std::cout << "> ";
         std::getline(std::cin, input);
 
@@ -198,7 +200,11 @@ static void interactiveMenu() {
 
         if (input == "q" || input == "Q") {
             std::cout << "退出程序" << std::endl;
-            break;
+            return false;
+        }
+        if (input == "r" || input == "R") {
+            std::cout << "\n返回网卡选择界面...\n" << std::endl;
+            return true;
         }
         if (input == "s" || input == "S") {
             saveLog();
@@ -245,48 +251,48 @@ int main() {
     }
     std::cout << "Npcap 加载成功" << std::endl;
 
-    pcap_if_t* allDevs = nullptr;
-    char errBuf[256] = {0};
-    g_pcap.findalldevs(&allDevs, errBuf);
+    bool restart = true;
+    while (restart) {
+        restart = false;
+        g_packets.clear();
 
-    pcap_if_t* dev = selectInterface();
-    if (!dev) {
-        system("pause");
-        return 1;
+        std::string devName = selectInterface();
+        if (devName.empty()) {
+            system("pause");
+            break;
+        }
+
+        char errBuf[256] = {0};
+
+        pcap_t* handle = g_pcap.open_live(devName.c_str(), 65536, 1, 1000, errBuf);
+        if (!handle) {
+            std::cerr << "打开网络接口失败: " << errBuf << std::endl;
+            std::cerr << "请以管理员身份运行本程序" << std::endl;
+            system("pause");
+            break;
+        }
+
+        std::cout << "\n开始抓包... (按 Enter 键停止)\n" << std::endl;
+        printTableHeader();
+
+        g_capturing.store(true);
+        std::thread capThread(captureThread, handle);
+
+        std::cin.get();
+        g_capturing.store(false);
+
+        capThread.join();
+        g_pcap.close(handle);
+
+        std::cout << "\n抓包结束，共抓取 " << g_packets.size() << " 个数据包" << std::endl;
+
+        if (g_packets.empty()) {
+            std::cout << "未抓取到任何数据包" << std::endl;
+            continue;
+        }
+
+        restart = interactiveMenu();
     }
-
-    std::string devName = dev->name;
-    g_pcap.freealldevs(allDevs);
-
-    pcap_t* handle = g_pcap.open_live(devName.c_str(), 65536, 1, 1000, errBuf);
-    if (!handle) {
-        std::cerr << "打开网络接口失败: " << errBuf << std::endl;
-        std::cerr << "请以管理员身份运行本程序" << std::endl;
-        system("pause");
-        return 1;
-    }
-
-    std::cout << "\n开始抓包... (按 Enter 键停止)\n" << std::endl;
-    printTableHeader();
-
-    g_capturing.store(true);
-    std::thread capThread(captureThread, handle);
-
-    std::cin.get();
-    g_capturing.store(false);
-
-    capThread.join();
-    g_pcap.close(handle);
-
-    std::cout << "\n抓包结束，共抓取 " << g_packets.size() << " 个数据包" << std::endl;
-
-    if (g_packets.empty()) {
-        std::cout << "未抓取到任何数据包" << std::endl;
-        system("pause");
-        return 0;
-    }
-
-    interactiveMenu();
 
     WSACleanup();
     return 0;
